@@ -10,6 +10,9 @@
 # (quintiles of class rank based on final GPA), academicSubUnit 
 # (firstyear student v transfer), degreeLevelAbbrev
 
+# everybody sept 1 1985 and after is a gordon college grad
+# deductive reasoning on those before 1985 to split gordon and barrington
+# first gen as academicSubUnit
 
 
 # Library -----------------------------------------------------------------
@@ -37,6 +40,13 @@ gcw <- dbConnect(odbc(),
                  database = "GCWarehouse", 
                  uid = "josephine.noonan",
                  pwd = key_get("ADMINPRODSQL"))
+syn <- dbConnect(odbc(), 
+                 driver = "/opt/homebrew/lib/libmsodbcsql.17.dylib", 
+                 server = "adminprodsql.gordon.edu", 
+                 port = 1433, 
+                 database = "synergy", 
+                 uid = "josephine.noonan",
+                 pwd = key_get("ADMINPRODSQL"))
 
 # Import ------------------------------------------------------------------
 
@@ -53,6 +63,8 @@ biograph_master <- tbl(tms, "BIOGRAPH_MASTER")
 gord_latest_ethnicrace_detail <- tbl(tms, "GORD_Latest_ETHNICRACE_Detail")
 gord_addr_all_email_addrs <- tbl(tms, "GORD_ADDR_All_Email_Addrs")
 address_history <- tbl(tms, "ADDRESS_HISTORY")
+firstgenerationstudents <- tbl(syn, "FirstGenerationStudents") 
+stud_term_sum_div <- tbl(tms, "STUD_TERM_SUM_DIV")
 
 # Prepare the alumni data sets ------------------------------------------------
 
@@ -163,6 +175,9 @@ alum_sectioned <- alum_imp |>
                                  programNameOriginal),
     degreeLevelSpelled = ifelse(degreeLevelSpelled == "Unknown Degree",
                                 NA,
+                                degreeLevelSpelled),
+    degreeLevelSpelled = ifelse(degreeLevelSpelled == "Master of Arts in Teachng",
+                                "Master of Arts in Teaching",
                                 degreeLevelSpelled))
 
 alum_known <- alum_sectioned |>
@@ -213,7 +228,7 @@ degree_history <- degree_history_tms |>
                values_to = "major") |>
   filter(!is.na(DTE_DEGR_CONFERRED),
          !is.na(major)) |>
-  select(ID_NUM, major, DTE_DEGR_CONFERRED, CLASS_RANK, CLASS_SIZE) |>
+  select(ID_NUM, maj_type, major, DTE_DEGR_CONFERRED, CLASS_RANK, CLASS_SIZE) |>
   collect() |>
   mutate_all(.funs = trimws) |>
   mutate(ID_NUM = as.numeric(ID_NUM),
@@ -418,31 +433,31 @@ names <- namemaster |>
       .default = lastName2))
 
 # gender, birthdate
-# gen_bir <- biograph_master |>
-#   filter(ID_NUM %in% ids) |>
-#   select(ID_NUM, GENDER, BIRTH_DTE) |>
-#   collect() |>
-#   rename(gender = GENDER,
-#          birthDate = BIRTH_DTE)
+gen_bir <- biograph_master |>
+  filter(ID_NUM %in% ids) |>
+  select(ID_NUM, GENDER, BIRTH_DTE) |>
+  collect() |>
+  rename(gender = GENDER,
+         birthDate = BIRTH_DTE)
 
 # race, ethnicity
 raceethnicity <- gord_latest_ethnicrace_detail |>
   collect() 
 ethrace <- raceethnicity |>
   filter(id_num %in% ids) |>
-  mutate(race = case_when(White+Pacific+AfrAmer+Asian+AmerIndian == 0 ~ "Unknown Race",
+  mutate(race = case_when(White+Pacific+AfrAmer+Asian+AmerIndian == 0 ~ NA,
                           White+Pacific+AfrAmer+Asian+AmerIndian > 1 ~ "Two or more races",
                           White == 1 ~ "White",
                           Pacific == 1 ~ "Native Hawaiian or Other Pacific Islander",
                           AfrAmer == 1 ~ "Black or African American",
                           Asian == 1 ~ "Asian",
                           AmerIndian == 1 ~ "American Indian or Alaska Native"),
-         ETHNIC_RPT_DESC = ifelse(ETHNIC_RPT_DESC == "Unreported", "Unknown Ethnicity", ETHNIC_RPT_DESC)) |>
+         ETHNIC_RPT_DESC = ifelse(ETHNIC_RPT_DESC == "Unreported", NA, ETHNIC_RPT_DESC)) |>
   rename(studentID = id_num, 
          ethnicity = ETHNIC_RPT_DESC) |>
   select(studentID, ethnicity, race) |>
   # 10004506 showed up twice, once with an unknown ethnicity, and once with a known ethnicity
-  filter(studentID != 10004506 | ethnicity != "Unknown Ethnicity")
+  filter(studentID != 10004506 | !is.na(ethnicity))
 
 # emails
 gaaea <- gord_addr_all_email_addrs |>
@@ -450,10 +465,19 @@ gaaea <- gord_addr_all_email_addrs |>
 emails <- gaaea |>
   filter(ID_NUM %in% ids) |>
   select(ID_NUM, Email, Alternate_Email, Personal_Email) |>
+  pivot_longer(cols = c(Email, Alternate_Email, Personal_Email),
+               names_to = NULL,
+               values_to = "email") |>
+  drop_na(email) |>
+  distinct() |>
+  group_by(ID_NUM) |>
+  mutate(name = row_number()) |>
+  pivot_wider(values_from = email,
+              names_from = name) |>
   rename(studentID = ID_NUM,
-         email1 = Email,
-         email2 = Alternate_Email,
-         `email#n` = Personal_Email)
+         email1 = `1`,
+         email2 = `2`,
+         `email#n` = `3`)
 
 # phones addresses
 ah <- address_history |>
@@ -480,6 +504,28 @@ phone_address <- ah |>
          city1 = CITY,
          state1 = STATE,
          zipCode1 = ZIP)
+
+# academicUnit
+stsd <- stud_term_sum_div |>
+  group_by(ID_NUM, DEGREE_CDE) |>
+  filter(YR_CDE == max(YR_CDE),
+         TRM_CDE != "TR",
+         DIV_CDE != "AL") |> 
+  collect() |>
+  mutate(TRM_CDE = factor(TRM_CDE, 
+                          levels = c("SF", "FA", "FW", "WS", "JN", "SP", "MA", "SS", "SU", "YR"),
+                          ordered = T)) |>
+  filter(TRM_CDE == max(TRM_CDE)) |>
+  filter(CAREER_GPA == max(CAREER_GPA)) |>
+  mutate(g_u = ifelse(DIV_CDE %in% c("U2", "UG", "UO"),
+                      "U",
+                      "G"))
+
+
+# academicSubUNit
+firstgen <- firstgenerationstudents |>
+  collect()
+
 
 
 
@@ -569,7 +615,35 @@ all_alum <- bind_rows(alum_known |> mutate(cip6 = as.numeric(cip6)),
 
 # Clean existing columns and add in final columns from Jenzabar -----------
 
-final_tibble <- all_alum |>
+almost_final_tibble <- all_alum |>
+  mutate(programActive = case_when(degreeLevelSpelled %in% c("Associate in Applied Science", 
+  "Associate in Science",
+  "Associate of Science", 
+  "Bachelor of  Theology",
+  "Bachelor of Arts in New Testament", 
+  "Bachelor of Arts in Theology",
+  "Bachelor of Bible and Divinity",
+  "Bachelor of Divinity",
+  "Bachelor of Education",
+  "Bachelor of Music Educ",
+  "Bachelor of Music Education",
+  "Bachelor of Religious Education",
+  "Bachelor of Sacred Theology",
+  "Bachelor of Science in Christian Education", "Bachelor of Science in Education", 
+  "Bachelor of Theology", 
+  "Bachelor of Theology and Bible", 
+  "Bachelor's Degree",
+  "Diploma", 
+  "Doctor of Philosophy",
+  "Doctor of Theology",
+  "General Business Concentration",
+  "Master of Divinity",
+  "Master of Religous Education") ~ "N",
+  programNameOriginal %in% c("Pike Honors Program", "Physics/Engineering", "Data Science") ~ "Y",
+  .default = programActive),
+  programActive = ifelse(is.na(programActive), "N", programActive),
+  programNameOriginal = ifelse(programNameOriginal == "Unknown Degree", NA, programNameOriginal),
+  degreeLevelSpelled = ifelse(degreeLevelSpelled == "Unknown Degree", NA, degreeLevelSpelled)) |>
   left_join(names, join_by(studentID)) |>
   mutate(firstName.x = coalesce(firstName.x, firstName.y),
          preferredName.x = coalesce(preferredName.x, preferredName.y),
@@ -577,19 +651,35 @@ final_tibble <- all_alum |>
          lastName1.x = coalesce(lastName1.x, lastName1.y),
          lastName2.x = coalesce(lastName2.x, lastName2.y),
          .keep = "unused") |>
+  rename(firstName = firstName.x,
+         preferredName = preferredName.x,
+         middleName = middleName.x,
+         lastName1 = lastName1.x,
+         lastName2 = lastName2.x) |>
   left_join(gen_bir, join_by(studentID == ID_NUM)) |>
   mutate(gender.x = coalesce(gender.x, gender.y),
          birthDate.x = coalesce(birthDate.x, birthDate.y),
          .keep = "unused") |>
+  rename(gender = gender.x,
+         birthDate = birthDate.x) |>
+  mutate(gender = ifelse(gender == "U", NA, gender)) |>
   left_join(ethrace, join_by(studentID)) |>
   mutate(ethnicity.x = coalesce(as.character(ethnicity.x), ethnicity.y),
          race.x = coalesce(as.character(race.x), race.y),
          .keep = "unused") |>
+  rename(ethnicity = ethnicity.x,
+         race = race.x) |>
+  mutate(race = ifelse(race == "Caucasian/White",
+                       "White",
+                       race)) |>
   left_join(emails, join_by(studentID)) |>
   mutate(email1.x = coalesce(email1.x, email1.y),
          email2.x = coalesce(email2.x, email2.y),
          `email#n.x` = coalesce(`email#n.x`, `email#n.y`),
          .keep = "unused") |>
+  rename(email1 = email1.x,
+         email2 = email2.x,
+         `email#n` = `email#n.x`) |>
   left_join(phone_address, join_by(studentID)) |>
   mutate(phone1.x = coalesce(phone1.x, as.character(phone1.y)),
          addressLineOne1.x = coalesce(addressLineOne1.x, addressLineOne1.y),
@@ -597,7 +687,96 @@ final_tibble <- all_alum |>
          city1.x = coalesce(city1.x, city1.y),
          state1.x = coalesce(state1.x, state1.y),
          zipCode1.x = coalesce(zipCode1.x, zipCode1.y),
-         campus = ifelse(gradDate >= ymd("1991-05-19"),
+         .keep = "unused") |>
+  rename(phone1 = phone1.x,
+         addressLineOne1 = addressLineOne1.x,
+         addressLineTwo1 = addressLineTwo1.x,
+         city1 = city1.x,
+         state1 = state1.x,
+         zipCode1 = zipCode1.x) |>
+  mutate(campus = ifelse(gradDate >= ymd("1985-09-01"),
                          "Gordon College",
-                         campus),
-         .keep = "unused") 
+                         campus)) |>
+  left_join(firstgen, join_by(studentID == ID_NUM)) |>
+  mutate(academicSubUnit = case_when(
+    is_first_generation == 1 ~ "First Generation",
+    str_detect(degreeLevelSpelled, "Bachelor") & 
+      is.na(is_first_generation) & 
+      gradDate >= ymd("1998-01-01") ~ "Not First Generation")) 
+
+ready_for_quantiles <- left_join(almost_final_tibble |>
+            select(studentID, degreeLevelAbbrev, degreeLevelSpelled, gradDate),
+          stsd |> mutate(DEGREE_CDE = str_trim(DEGREE_CDE)) |> select(ID_NUM, DEGREE_CDE, g_u, CAREER_GPA),
+          join_by(studentID == ID_NUM, degreeLevelAbbrev == DEGREE_CDE)) |> 
+  mutate(g_u = case_when(!is.na(g_u) ~ g_u,
+                         degreeLevelSpelled %in% c("Associate in Applied Science",
+                                                   "Associate in Science",
+                                                   "Associate of Science",
+                                                   "Bachelor of  Theology",
+                                                   "Bachelor of Arts",
+                                                   "Bachelor of Arts in New Testament",
+                                                   "Bachelor of Arts in Theology",
+                                                   "Bachelor of Bible and Divinity",
+                                                   "Bachelor of Divinity",
+                                                   "Bachelor of Education",
+                                                   "Bachelor of Music",
+                                                   "Bachelor of Music Educ",
+                                                   "Bachelor of Music Education",
+                                                   "Bachelor of Religious Education",
+                                                   "Bachelor of Sacred Theology",
+                                                   "Bachelor of Science",
+                                                   "Bachelor of Science in Christian Education",
+                                                   "Bachelor of Science in Education",
+                                                   "Bachelor of Theology",
+                                                   "Bachelor of Theology and Bible",
+                                                   "Bachelor's Degree") ~ "U",
+                         degreeLevelSpelled %in% c("Doctor of Philosophy",
+                                                   "Doctor of Theology",
+                                                   "Education Specialist",
+                                                   "Master of Arts",
+                                                   "Master of Arts in Teachng",
+                                                   "Master of Divinity",
+                                                   "Master of Education",
+                                                   "Master of Music Education",
+                                                   "Master of Public Health",
+                                                   "Master of Religous Education",
+                                                   "Master of Science"
+                                                   ) ~ "G"),
+         year = ifelse(month(gradDate) >= month(ymd("2000-09-01")),
+                       as.numeric(str_extract(gradDate, "[:digit:]{4}"))+1,
+                       as.numeric(str_extract(gradDate, "[:digit:]{4}")))) |>
+  distinct(studentID, year, g_u, CAREER_GPA, gradDate) |>
+  filter(year >= 2012) |>
+  drop_na()
+quintiles <- ready_for_quantiles |>
+  group_by(year, g_u) |>
+  mutate(quintile20 = quantile(CAREER_GPA, probs = c(.2)),
+         quintile40 = quantile(CAREER_GPA, probs = c(.4)),
+         quintile60 = quantile(CAREER_GPA, probs = c(.6)),
+         quintile80 = quantile(CAREER_GPA, probs = c(.8)),
+         quintile00 = quantile(CAREER_GPA, probs = c(1)))
+has_quintiles <- left_join(ready_for_quantiles, quintiles, join_by(studentID, year, g_u, CAREER_GPA, gradDate)) |>
+  mutate(quintile = case_when(CAREER_GPA < quintile20 ~ "GPA 20th Percentile and Below",
+                              between(CAREER_GPA, quintile20, quintile40) ~ "GPA 20th to 40th Percentile",
+                              between(CAREER_GPA, quintile40, quintile60) ~ "GPA 40th to 60th Percentile",
+                              between(CAREER_GPA, quintile60, quintile80) ~ "GPA 60th to 80th Percentile",
+                              between(CAREER_GPA, quintile80, quintile00) ~ "GPA 80th to 100th Percentile")) |>
+  select(studentID, gradDate, quintile) |>
+  group_by(studentID, gradDate) |>
+  filter(quintile == max(quintile)) |>
+  ungroup() |>
+  distinct()
+
+final_tibble <- left_join(almost_final_tibble, has_quintiles, join_by(studentID, gradDate)) |>
+  select(!c(section, is_first_generation))
+write.xlsx(final_tibble,
+           "lightcast_data_2026_08.xlsx")
+
+# Psychology, Social Welfare, and Social Work emails for Kaye Cook
+final_tibble |>
+  filter(str_detect(programNameOriginal, "Social Work|Social Welfare|Psychology")) |> 
+  select(firstName, preferredName, middleName, lastName1, lastName2, 
+         programNameOriginal, email1, 
+         email2, `email#n`, gradDate) |>
+  write.xlsx("school of psychology and human services graduates emails.xlsx")
+  
