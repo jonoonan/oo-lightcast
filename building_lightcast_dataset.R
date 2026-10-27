@@ -768,9 +768,11 @@ has_quintiles <- left_join(ready_for_quantiles, quintiles, join_by(studentID, ye
   distinct()
 
 final_tibble <- left_join(almost_final_tibble, has_quintiles, join_by(studentID, gradDate)) |>
-  select(!c(section, is_first_generation))
+  mutate(academicUnit = quintile) |>
+  select(!c(section, is_first_generation, quintile))
+  
 write.xlsx(final_tibble,
-           "lightcast_data_2026_08.xlsx")
+           "lightcast_data_2026_10.xlsx")
 
 # Psychology, Social Welfare, and Social Work emails for Kaye Cook
 final_tibble |>
