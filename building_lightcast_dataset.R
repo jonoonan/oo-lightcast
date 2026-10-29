@@ -680,6 +680,14 @@ almost_final_tibble <- all_alum |>
   rename(email1 = email1.x,
          email2 = email2.x,
          `email#n` = `email#n.x`) |>
+  # to address some missingness in first name
+  mutate(firstName = coalesce(firstName, preferredName),
+         firstName = ifelse(str_detect(firstName, "Rev\\. |Dr\\. |Capt\\. |Col\\. |Mr\\. |Lt\\. ") & str_detect(preferredName, "Rev\\. |Dr\\. |Capt\\. |Col\\. |Mr\\. |Lt\\. "),
+                            NA,
+                            firstName),
+         firstName = ifelse(is.na(firstName) & str_detect(email1, "@gordon.edu$"),
+                            str_split_i(email1, "\\.", i = 1),
+                            firstName)) |>
   left_join(phone_address, join_by(studentID)) |>
   mutate(phone1.x = coalesce(phone1.x, as.character(phone1.y)),
          addressLineOne1.x = coalesce(addressLineOne1.x, addressLineOne1.y),
@@ -770,9 +778,13 @@ has_quintiles <- left_join(ready_for_quantiles, quintiles, join_by(studentID, ye
 final_tibble <- left_join(almost_final_tibble, has_quintiles, join_by(studentID, gradDate)) |>
   mutate(academicUnit = quintile) |>
   select(!c(section, is_first_generation, quintile))
+
+# how many missing first names now?
+length(pull(final_tibble |> filter(is.na(firstName)), firstName))/length(pull(final_tibble, firstName))
+filter(almost_final_tibble, is.na(firstName)) |> View()
   
 write.xlsx(final_tibble,
-           "lightcast_data_2026_10.xlsx")
+           "lightcast_data_2026_10_29.xlsx")
 
 # Psychology, Social Welfare, and Social Work emails for Kaye Cook
 final_tibble |>
